@@ -1,0 +1,63 @@
+# Maven / build
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# Compiled / packaged
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+
+# Logs
+logs/
+*.log
+
+# Spring / local overrides (secrets)
+application-local.properties
+application-dev.properties
+application-prod.properties
+*.env
+.env
+.env.*
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.project
+.classpath
+.settings/
+.factorypath
+nbproject/
+nbbuild/
+nbdist/
+.nb-gradle/
+*.nbm
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temp / uploads
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
