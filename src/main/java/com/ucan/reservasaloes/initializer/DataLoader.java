@@ -76,11 +76,22 @@ public class DataLoader implements CommandLineRunner {
             return;
         }
 
-        Localidade localidade = new Localidade();
-        localidade.setNome("Luanda");
-        localidade.setTipo(TipoLocalidade.RUA);
-        localidade.setNomeRua("Porto Santo");
-        localidade = localidadeRepository.save(localidade);
+        // Reutilizar hierarquia real (não criar outra "Luanda" tipo RUA)
+        Localidade localidade = localidadeRepository
+                .findByNomeAndTipo("Maculusso", TipoLocalidade.BAIRRO)
+                .or(() -> localidadeRepository.findByTipo(TipoLocalidade.BAIRRO).stream().findFirst())
+                .or(() -> localidadeRepository.findByNomeAndTipo("Luanda", TipoLocalidade.PROVINCIA))
+                .orElseGet(() -> {
+                    Localidade fallback = new Localidade();
+                    fallback.setNome("Sede Administrativa");
+                    fallback.setTipo(TipoLocalidade.BAIRRO);
+                    fallback.setNomeRua("Porto Santo");
+                    return localidadeRepository.save(fallback);
+                });
+        if (localidade.getNomeRua() == null || localidade.getNomeRua().isBlank()) {
+            localidade.setNomeRua("Porto Santo");
+            localidade = localidadeRepository.save(localidade);
+        }
 
         Pessoa pessoa = new Pessoa();
         pessoa.setIdentificacao("AAABBBCCC");

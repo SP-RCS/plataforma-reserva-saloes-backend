@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.*;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +33,9 @@ public class LocalidadeService {
     @Autowired
     private LocalidadeRepository localidadeRepository;
 
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
     public LocalidadeService(LocalidadeRepository localidadeRepository) {
         this.localidadeRepository = localidadeRepository;
     }
@@ -38,65 +43,106 @@ public class LocalidadeService {
     @PostConstruct
     public void init() {
         try {
-            // Verificar se já há localidades no banco
             long count = localidadeRepository.count();
             logger.info("Total de localidades no banco: {}", count);
-            
-            if (count == 0) {
-                initializeLocalidades();
-            } else {
-                initLocalidadesCache();
-                criarLocalidadesAngolanas();
-            }
-            
+
+            // Escrita via TransactionTemplate (evita circular ref do self-proxy no @PostConstruct)
+            TransactionTemplate tx = new TransactionTemplate(transactionManager);
+            tx.executeWithoutResult(status -> ensureHierarquiaLuanda());
+
+            // Invalidar cache estático e recarregar após o seed
+            localidades = null;
+            localidadesByPkLocalidadeCache = null;
+            initLocalidadesCache();
+            criarLocalidadesAngolanas();
+
             localidadesInitialized = true;
-            logger.info("Localidades inicializadas com sucesso. Total: {}", 
-                       localidades != null ? localidades.size() : 0);
+            logger.info("Localidades inicializadas com sucesso. Total: {}",
+                    localidades != null ? localidades.size() : 0);
         } catch (Exception e) {
             logger.error("Erro ao inicializar localidades", e);
         }
     }
 
-    private void initializeLocalidades() {
-        logger.info("Inicializando localidades...");
-        
-        // Primeiro, garantir que Angola existe
-        Localidade angola = localidadeRepository.findByNome("Angola")
-            .orElseGet(() -> {
-                logger.info("Criando localidade Angola...");
-                Localidade novaAngola = new Localidade();
-                novaAngola.setNome("Angola");
-                novaAngola.setTipo(TipoLocalidade.PAIS);
-                Localidade salva = localidadeRepository.save(novaAngola);
-                logger.info("Angola criada com ID: {}", salva.getPkLocalidade());
-                return salva;
-            });
-        
-        logger.info("Angola: ID={}, Nome={}", angola.getPkLocalidade(), angola.getNome());
+    /**
+     * Garante Angola → Luanda (província) → municípios → bairros.
+     * Pode ser chamado com a BD vazia ou parcialmente preenchida.
+     */
+    public void ensureHierarquiaLuanda() {
+        logger.info("Garantindo hierarquia de localidades (Angola/Luanda)...");
 
-        // Criar Luanda (província)
+        Localidade angola = localidadeRepository.findByNomeAndTipo("Angola", TipoLocalidade.PAIS)
+                .orElseGet(() -> salvarLocalidade("Angola", TipoLocalidade.PAIS, null, null));
+
         Localidade luanda = localidadeRepository.findByNomeAndLocalidadePai("Luanda", angola)
-            .orElseGet(() -> {
-                logger.info("Criando província Luanda...");
-                Localidade provLuanda = new Localidade();
-                provLuanda.setNome("Luanda");
-                provLuanda.setTipo(TipoLocalidade.PROVINCIA);
-                provLuanda.setLocalidadePai(angola);
-                Localidade salva = localidadeRepository.save(provLuanda);
-                logger.info("Luanda (província) criada com ID: {}", salva.getPkLocalidade());
-                return salva;
-            });
+                .orElseGet(() -> {
+                    // Evitar reutilizar a "Luanda" tipo RUA criada por seeds antigos
+                    Optional<Localidade> porTipo = localidadeRepository
+                            .findByNomeAndTipo("Luanda", TipoLocalidade.PROVINCIA);
+                    if (porTipo.isPresent()) {
+                        Localidade existente = porTipo.get();
+                        if (existente.getLocalidadePai() == null) {
+                            existente.setLocalidadePai(angola);
+                            return localidadeRepository.save(existente);
+                        }
+                        return existente;
+                    }
+                    return salvarLocalidade("Luanda", TipoLocalidade.PROVINCIA, angola, null);
+                });
 
-        List<Sitio> sitios = Arrays.asList(
-                new Sitio("Belas", luanda.getNome(), angola.getNome(), "Rua Principal", "45"),
-                new Sitio("Cacuaco", luanda.getNome(), angola.getNome(), "Avenida Central", "120"),
-                new Sitio("Cazenga", luanda.getNome(), angola.getNome(), null, null),
-                new Sitio("Talatona", luanda.getNome(), angola.getNome(), "Rua do Mercado", "78"),
-                new Sitio("KilambaKiaxi", luanda.getNome(), angola.getNome(), null, null),
-                new Sitio("Viana", luanda.getNome(), angola.getNome(), null, null)
-        );
+        // Corrigir tipo se Luanda existir como PROVINCIA
+        if (luanda.getTipo() != TipoLocalidade.PROVINCIA) {
+            luanda.setTipo(TipoLocalidade.PROVINCIA);
+            luanda.setLocalidadePai(angola);
+            luanda = localidadeRepository.save(luanda);
+        }
 
-        saveAll(sitios);
+        Map<String, String[]> bairrosPorMunicipio = new LinkedHashMap<>();
+        bairrosPorMunicipio.put("Belas", new String[]{"Quenguela", "Morro dos Veados", "Ramiros", "Vila Verde", "Cabolombo", "Kilamba"});
+        bairrosPorMunicipio.put("Cacuaco", new String[]{"Kikolo", "Cacuaco Sede", "Mulenvos de Baixo", "Sequele"});
+        bairrosPorMunicipio.put("Cazenga", new String[]{"Cazenga Sede", "Hoji ya Henda", "11 de Novembro", "Tala Hadi", "Kalawenda"});
+        bairrosPorMunicipio.put("Kilamba Kiaxi", new String[]{"Golfe", "Sapú", "Palanca", "Nova Vida"});
+        bairrosPorMunicipio.put("Viana", new String[]{"Viana Sede", "Estalagem", "Kikuxi", "Zango", "Vila Flôr"});
+        bairrosPorMunicipio.put("Ingombota", new String[]{"Maculusso", "Patrice Lumumba", "Ilha do Cabo", "Mutamba", "Coqueiros"});
+        bairrosPorMunicipio.put("Sambizanga", new String[]{"Malanga", "Bairro Operário"});
+        bairrosPorMunicipio.put("Maianga", new String[]{"Catambor", "Cassenda", "Prenda", "Alvalade", "Cassequel"});
+        bairrosPorMunicipio.put("Rangel", new String[]{"Terra Nova", "Precol", "Combatentes", "Vila Alice"});
+        bairrosPorMunicipio.put("Samba", new String[]{"Rocha Pinto", "Morro Bento", "Corimba"});
+        bairrosPorMunicipio.put("Talatona", new String[]{"Benfica", "Futungo de Belas", "Lar do Patriota", "Camama", "Cidade Universitária"});
+
+        for (Map.Entry<String, String[]> entry : bairrosPorMunicipio.entrySet()) {
+            String nomeMunicipio = entry.getKey();
+            Localidade municipio = garantirFilho(nomeMunicipio, TipoLocalidade.MUNICIPIO, luanda);
+
+            for (String nomeBairro : entry.getValue()) {
+                garantirFilho(nomeBairro, TipoLocalidade.BAIRRO, municipio);
+            }
+        }
+
+        logger.info("Hierarquia Luanda garantida. Municípios: {}", bairrosPorMunicipio.size());
+    }
+
+    private Localidade garantirFilho(String nome, TipoLocalidade tipo, Localidade pai) {
+        return localidadeRepository.findByNomeAndLocalidadePai(nome, pai)
+                .map(existente -> {
+                    if (existente.getTipo() != tipo) {
+                        existente.setTipo(tipo);
+                        return localidadeRepository.save(existente);
+                    }
+                    return existente;
+                })
+                .orElseGet(() -> salvarLocalidade(nome, tipo, pai, null));
+    }
+
+    private Localidade salvarLocalidade(String nome, TipoLocalidade tipo, Localidade pai, String nomeRua) {
+        Localidade loc = new Localidade();
+        loc.setNome(nome);
+        loc.setTipo(tipo);
+        loc.setLocalidadePai(pai);
+        loc.setNomeRua(nomeRua);
+        Localidade salva = localidadeRepository.save(loc);
+        logger.info("Localidade criada: {} ({}) id={}", nome, tipo, salva.getPkLocalidade());
+        return salva;
     }
 
     private void saveAll(List<Sitio> sitios) {
@@ -105,8 +151,8 @@ public class LocalidadeService {
                 Localidade loc = generateLocalidade(s);
                 if (loc != null) {
                     Localidade salva = this.localidadeRepository.save(loc);
-                    logger.info("Localidade salva: {} (ID: {})", 
-                               salva.getNome(), salva.getPkLocalidade());
+                    logger.info("Localidade salva: {} (ID: {})",
+                            salva.getNome(), salva.getPkLocalidade());
                 }
             } catch (Exception e) {
                 logger.error("Erro ao salvar localidade {}: {}", s.getNome(), e.getMessage());
@@ -202,7 +248,8 @@ public class LocalidadeService {
         logger.info("Inicializando cache de localidades...");
         
         localidadesByPkLocalidadeCache = new HashMap<>();
-        localidades = this.localidadeRepository.findAll();
+        // Cópia mutável: evita ConcurrentModificationException com listas geridas pelo Hibernate
+        localidades = new ArrayList<>(this.localidadeRepository.findAll());
 
         logger.info("Total de localidades carregadas: {}", localidades.size());
         
@@ -284,7 +331,7 @@ public class LocalidadeService {
         
         for (Localidade l : localidades) {
             if (l.getLocalidadePai() != null &&
-                l.getLocalidadePai().getPkLocalidade() == pkLocalidadePai) {
+                Objects.equals(l.getLocalidadePai().getPkLocalidade(), pkLocalidadePai)) {
                 filhos.add(l);
             }
         }
@@ -320,7 +367,6 @@ public class LocalidadeService {
 
     public List<Localidade> listarTodas() {
         if (localidades == null || localidades.isEmpty()) {
-            localidades = localidadeRepository.findAll();
             initLocalidadesCache();
         }
         return localidades;
@@ -361,6 +407,9 @@ public class LocalidadeService {
             return resultado;
         }
         for (Localidade provincia : findAllFilhos(angola.get().getPkLocalidade())) {
+            if (provincia.getTipo() != TipoLocalidade.PROVINCIA) {
+                continue;
+            }
             Map<String, Object> item = new HashMap<>();
             item.put("id", provincia.getPkLocalidade());
             item.put("nome", provincia.getNome());
